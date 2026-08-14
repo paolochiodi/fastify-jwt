@@ -2708,6 +2708,71 @@ test('expose decode token for plugin extension', async function (t) {
   })
 })
 
+test('per-request keys override the global secret in route methods', async function (t) {
+  const USER_KEY = 'user-domain-key'
+  const ADMIN_KEY = 'admin-domain-key'
+
+  const fastify = Fastify()
+  fastify.register(jwt, { secret: USER_KEY })
+
+  fastify.get('/admin', async function (request) {
+    return request.jwtVerify({ verify: { key: ADMIN_KEY } })
+  })
+
+  fastify.get('/admin-flat', async function (request) {
+    return request.jwtVerify({ key: ADMIN_KEY })
+  })
+
+  fastify.post('/admin-token', async function (request, reply) {
+    const token = await reply.jwtSign({ tokenDomain: 'admin' }, { key: ADMIN_KEY })
+    return { token }
+  })
+
+  await fastify.ready()
+
+  const userToken = fastify.jwt.sign({ tokenDomain: 'user' })
+  const adminToken = fastify.jwt.sign({ tokenDomain: 'admin' }, { key: ADMIN_KEY })
+
+  const userResponse = await fastify.inject({
+    method: 'GET',
+    url: '/admin',
+    headers: { authorization: `Bearer ${userToken}` }
+  })
+  t.assert.strictEqual(userResponse.statusCode, 401)
+
+  const adminResponse = await fastify.inject({
+    method: 'GET',
+    url: '/admin',
+    headers: { authorization: `Bearer ${adminToken}` }
+  })
+  t.assert.strictEqual(adminResponse.statusCode, 200)
+  t.assert.strictEqual(adminResponse.json().tokenDomain, 'admin')
+
+  const flatUserResponse = await fastify.inject({
+    method: 'GET',
+    url: '/admin-flat',
+    headers: { authorization: `Bearer ${userToken}` }
+  })
+  t.assert.strictEqual(flatUserResponse.statusCode, 401)
+
+  const flatAdminResponse = await fastify.inject({
+    method: 'GET',
+    url: '/admin-flat',
+    headers: { authorization: `Bearer ${adminToken}` }
+  })
+  t.assert.strictEqual(flatAdminResponse.statusCode, 200)
+
+  const signResponse = await fastify.inject({
+    method: 'POST',
+    url: '/admin-token'
+  })
+  const routeToken = signResponse.json().token
+  t.assert.strictEqual(fastify.jwt.verify(routeToken, { key: ADMIN_KEY }).tokenDomain, 'admin')
+  t.assert.throws(() => fastify.jwt.verify(routeToken, { key: USER_KEY }), /signature/i)
+
+  await fastify.close()
+})
+
 test('support extended config contract', async function (t) {
   t.plan(1)
   const extConfig = {
@@ -2924,7 +2989,7 @@ test('supporting time definitions for "maxAge", "expiresIn" and "notBefore"', as
 
     const token = JSON.parse(signResponse.payload).token
     t.assert.ok(token)
-    fastify.jwt.verify(token, { secret: 'test' }, (err, result) => {
+    fastify.jwt.verify(token, { key: 'secret' }, (err, result) => {
       t.assert.ifError(err)
       t.assert.ok(result)
       t.assert.ok(result.exp)
