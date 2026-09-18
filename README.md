@@ -111,13 +111,15 @@ If you need to verify Auth0 issued HS256 or RS256 JWT tokens, you can use [fasti
 ## Options
 
 ### `secret` (required)
-You must pass a `secret` to the `options` parameter. The `secret` can be a primitive type String, a function that returns a String or an object `{ private, public }`.
+You must pass a `secret` to the `options` parameter. The `secret` can be a string, a buffer, a function that provides a string or buffer via a callback or Promise, or an object `{ private, public }`.
 
 In this object `{ private, public }` the `private` key is a string, buffer, or object containing either the secret for HMAC algorithms or the PEM encoded private key for RSA and ECDSA. In case of a private key with passphrase an object `{ private: { key, passphrase }, public }` can be used (based on [crypto documentation](https://nodejs.org/api/crypto.html)), in this case be sure you pass the `algorithm` inside the signing options prefixed by the `sign` key of the plugin registering options).
 
 In this object `{ private, public }` the `public` key is a string or buffer containing either the secret for HMAC algorithms, or the PEM encoded public key for RSA and ECDSA.
 
 Function based `secret` is supported by all methods (`request.jwtVerify()`, `reply.jwtSign()`, `fastify.jwt.sign()`, and `fastify.jwt.verify()`) and is called with a `context` object and a `callback`.
+
+Providers can call `callback(null, key)` or return a Promise resolving to the key. Function-valued `sign.key` and `verify.key` options, including per-call overrides, use this same contract.
 
 The `context` object has the following shape:
 - `operation`: `'sign'` or `'verify'`
@@ -126,7 +128,9 @@ The `context` object has the following shape:
 - `signature`: the JWT signature (only for `'verify'`)
 - `request`: the Fastify request object (only available in `request.jwtVerify()` and `reply.jwtSign()`)
 
-When using a function-based secret with `fastify.jwt.sign()` or `fastify.jwt.verify()`, a callback argument is required.
+During verification, the context contains decoded but unverified token data. Do not treat it as authenticated until verification succeeds.
+
+When the effective key is a function, `fastify.jwt.sign()` and `fastify.jwt.verify()` require a callback argument, even if the provider returns a Promise. A static `key` override allows synchronous calls even when the plugin's `secret` is a function. Request/reply methods continue to support both callbacks and Promises.
 
 #### Verify-only mode
 

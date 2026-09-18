@@ -477,8 +477,7 @@ function fastifyJwt (fastify, options, next) {
           const token = localSigner(payload)
           callback(null, token)
         } else {
-          const signerOptions = withResolvedKey(signerConfig.options, secretOrPrivateKey)
-          const localSigner = signer || createSigner(signerOptions)
+          const localSigner = signer || createSigner(withResolvedKey(signerConfig.options, secretOrPrivateKey))
           const token = localSigner(payload)
           callback(null, token)
         }

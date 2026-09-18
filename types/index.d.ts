@@ -1,7 +1,6 @@
 import {
   DecoderOptions,
   JwtHeader,
-  KeyFetcher,
   SignerCallback,
   SignerOptions,
   VerifierCallback,
@@ -162,9 +161,12 @@ declare namespace fastifyJwt {
 
   export type SecretContext = SecretContextVerify | SecretContextSign
 
-  export type Secret = string | Buffer | KeyFetcher | { key: Secret; passphrase: string }
-    | ((context: SecretContext, cb: (e: Error | null, secret: string | Buffer | undefined) => void) => void)
-    | ((context: SecretContext) => Promise<string | Buffer>)
+  export type SecretProvider = (
+    context: SecretContext,
+    cb: (e: Error | null, secret: string | Buffer | undefined) => void
+  ) => void | Promise<string | Buffer | void>
+
+  export type Secret = string | Buffer | SecretProvider | { key: Secret; passphrase: string }
 
   export type VerifyPayloadType = object | string
   export type DecodePayloadType = object | string
@@ -173,9 +175,7 @@ declare namespace fastifyJwt {
     (err: Error, decoded: Decoded): void
   }
 
-  export type KeyOption = string | Buffer
-    | ((context: SecretContext, cb: (e: Error | null, secret: string | Buffer | undefined) => void) => void)
-    | ((context: SecretContext) => Promise<string | Buffer>)
+  export type KeyOption = string | Buffer | SecretProvider
 
   export interface SignOptions extends Omit<SignerOptions, 'expiresIn' | 'notBefore'> {
     expiresIn: number | string;

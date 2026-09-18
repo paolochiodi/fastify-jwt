@@ -758,62 +758,20 @@ test('sign and verify with function secret (server methods)', async function (t)
     return promise
   })
 
-  await t.test('requestVerify context includes request', async function (t) {
+  await t.test('replySign context shape', async function (t) {
     const fastify = Fastify()
-    let verifyContext = null
-    fastify.register(jwt, {
-      secret: function (context, cb) {
-        if (context.operation === 'verify') {
-          verifyContext = context
-        }
-        cb(null, 'test-secret')
-      }
-    })
-
-    fastify.get('/verify', function (request) {
-      return request.jwtVerify()
-    })
-
-    await fastify.ready()
-
-    const { promise, resolve } = helper.withResolvers()
-
-    fastify.jwt.sign({ foo: 'bar' }, function (error, token) {
-      t.assert.ifError(error)
-
-      fastify.inject({
-        method: 'get',
-        url: '/verify',
-        headers: { authorization: `Bearer ${token}` }
-      }).then(function (response) {
-        const decoded = JSON.parse(response.payload)
-        t.assert.strictEqual(decoded.foo, 'bar')
-        t.assert.ok(verifyContext)
-        t.assert.strictEqual(verifyContext.operation, 'verify')
-        t.assert.ok(verifyContext.request)
-        t.assert.ok(verifyContext.header)
-        t.assert.strictEqual(verifyContext.payload.foo, 'bar')
-        t.assert.strictEqual(typeof verifyContext.payload.iat, 'number')
-        t.assert.ok(verifyContext.signature)
-        resolve()
-      })
-    })
-    return promise
-  })
-
-  await t.test('replySign context includes request', async function (t) {
-    const fastify = Fastify()
+    t.after(() => fastify.close())
     let signContext = null
+    let routeRequest
     fastify.register(jwt, {
       secret: function (context, cb) {
-        if (context.operation === 'sign') {
-          signContext = context
-        }
+        signContext = context
         cb(null, 'test-secret')
       }
     })
 
     fastify.post('/sign', async function (request, reply) {
+      routeRequest = request
       const token = await reply.jwtSign(request.body)
       return { token }
     })
@@ -826,43 +784,12 @@ test('sign and verify with function secret (server methods)', async function (t)
       payload: { foo: 'bar' }
     })
 
-    const result = JSON.parse(response.payload)
-    t.assert.ok(result.token)
-    t.assert.ok(signContext)
-    t.assert.strictEqual(signContext.operation, 'sign')
-    t.assert.ok(signContext.request)
-    t.assert.deepStrictEqual(signContext.payload, { foo: 'bar' })
-  })
-
-  await t.test('replySign context shape', async function (t) {
-    const fastify = Fastify()
-    let signContext = null
-    fastify.register(jwt, {
-      secret: function (context, cb) {
-        if (context.operation === 'sign') {
-          signContext = context
-        }
-        cb(null, 'test-secret')
-      }
-    })
-
-    fastify.post('/sign', async function (request, reply) {
-      const token = await reply.jwtSign(request.body)
-      return { token }
-    })
-
-    await fastify.ready()
-
-    await fastify.inject({
-      method: 'post',
-      url: '/sign',
-      payload: { foo: 'bar' }
-    })
-
+    t.assert.strictEqual(response.statusCode, 200)
+    t.assert.ok(response.json().token)
     t.assert.ok(signContext)
     t.assert.strictEqual(signContext.operation, 'sign')
     t.assert.deepStrictEqual(signContext.payload, { foo: 'bar' })
-    t.assert.ok(signContext.request)
+    t.assert.strictEqual(signContext.request, routeRequest)
     t.assert.strictEqual(signContext.request.method, 'POST')
     t.assert.strictEqual(signContext.header, undefined)
     t.assert.strictEqual(signContext.signature, undefined)
@@ -870,46 +797,41 @@ test('sign and verify with function secret (server methods)', async function (t)
 
   await t.test('requestVerify context shape', async function (t) {
     const fastify = Fastify()
+    t.after(() => fastify.close())
     let verifyContext = null
+    let routeRequest
     fastify.register(jwt, {
       secret: function (context, cb) {
-        if (context.operation === 'verify') {
-          verifyContext = context
-        }
+        verifyContext = context
         cb(null, 'test-secret')
       }
     })
 
     fastify.get('/verify', function (request) {
+      routeRequest = request
       return request.jwtVerify()
     })
 
     await fastify.ready()
 
-    const { promise, resolve } = helper.withResolvers()
-
-    fastify.jwt.sign({ foo: 'bar' }, function (error, token) {
-      t.assert.ifError(error)
-
-      fastify.inject({
-        method: 'get',
-        url: '/verify',
-        headers: { authorization: `Bearer ${token}` }
-      }).then(function (response) {
-        t.assert.strictEqual(response.statusCode, 200)
-        t.assert.ok(verifyContext)
-        t.assert.strictEqual(verifyContext.operation, 'verify')
-        t.assert.strictEqual(verifyContext.payload.foo, 'bar')
-        t.assert.strictEqual(typeof verifyContext.payload.iat, 'number')
-        t.assert.strictEqual(verifyContext.header.alg, 'HS256')
-        t.assert.strictEqual(verifyContext.header.typ, 'JWT')
-        t.assert.strictEqual(typeof verifyContext.signature, 'string')
-        t.assert.ok(verifyContext.request)
-        t.assert.strictEqual(verifyContext.request.method, 'GET')
-        resolve()
-      })
+    const token = createSigner({ key: 'test-secret' })({ foo: 'bar' })
+    const response = await fastify.inject({
+      method: 'get',
+      url: '/verify',
+      headers: { authorization: `Bearer ${token}` }
     })
-    return promise
+
+    t.assert.strictEqual(response.statusCode, 200)
+    t.assert.strictEqual(response.json().foo, 'bar')
+    t.assert.ok(verifyContext)
+    t.assert.strictEqual(verifyContext.operation, 'verify')
+    t.assert.strictEqual(verifyContext.payload.foo, 'bar')
+    t.assert.strictEqual(typeof verifyContext.payload.iat, 'number')
+    t.assert.strictEqual(verifyContext.header.alg, 'HS256')
+    t.assert.strictEqual(verifyContext.header.typ, 'JWT')
+    t.assert.strictEqual(verifyContext.signature, token.split('.')[2])
+    t.assert.strictEqual(verifyContext.request, routeRequest)
+    t.assert.strictEqual(verifyContext.request.method, 'GET')
   })
 
   await t.test('replySign with callback and function secret', async function (t) {
