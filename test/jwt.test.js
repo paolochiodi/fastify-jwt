@@ -486,6 +486,53 @@ test('instance verify delivers decode errors through callbacks', async function 
   }
 })
 
+test('instance verify with static key overrides decodes only once', async function (testContext) {
+  const token = createSigner({ key: 'test' })({ foo: 'bar' })
+
+  for (const dynamicSecret of [false, true]) {
+    for (const key of ['test', Buffer.from('test')]) {
+      await testContext.test(`${dynamicSecret ? 'function' : 'static'} secret, ${typeof key} key`, async function (testContext) {
+        const fastify = Fastify()
+        testContext.after(() => fastify.close())
+        fastify.register(jwt, {
+          secret: dynamicSecret ? function () { throw new Error('overridden provider must not run') } : 'test'
+        })
+        await fastify.ready()
+
+        const options = { key }
+        const parse = testContext.mock.method(JSON, 'parse')
+        const expected = fastify.jwt.verify(token, options)
+        const syncParseCalls = parse.mock.callCount()
+        parse.mock.resetCalls()
+
+        const callback = testContext.mock.fn()
+        fastify.jwt.verify(token, options, callback)
+
+        testContext.assert.strictEqual(parse.mock.callCount(), syncParseCalls)
+        testContext.assert.strictEqual(callback.mock.callCount(), 1)
+        testContext.assert.deepStrictEqual(callback.mock.calls[0].arguments, [null, expected])
+      })
+    }
+  }
+})
+
+test('instance verify retains decode type checks with static key overrides', async function (testContext) {
+  const fastify = Fastify()
+  testContext.after(() => fastify.close())
+  fastify.register(jwt, { secret: 'test', decode: { checkTyp: 'JWT' } })
+  await fastify.ready()
+
+  const token = createSigner({ key: 'test', header: { typ: 'OTHER' } })({ foo: 'bar' })
+  const callback = testContext.mock.fn()
+  fastify.jwt.verify(token, { key: 'test', checkTyp: 'OTHER' }, callback)
+
+  testContext.assert.strictEqual(callback.mock.callCount(), 1)
+  const [error, result] = callback.mock.calls[0].arguments
+  testContext.assert.ok(error instanceof TokenError)
+  testContext.assert.strictEqual(error.code, TokenError.codes.invalidType)
+  testContext.assert.strictEqual(result, undefined)
+})
+
 test('instance methods handle secret provider completion', async function (t) {
   const token = createSigner({ key: 'test' })({ foo: 'bar' })
 

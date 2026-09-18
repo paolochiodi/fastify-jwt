@@ -205,6 +205,7 @@ function fastifyJwt (fastify, options, next) {
     : null
   const decoder = createDecoder(decodeOptions)
   const completeDecoder = createDecoder(Object.assign({}, decodeOptions, { complete: true }))
+  const hasDecodeTypeCheck = Boolean(decodeOptions.checkTyp)
   const verifierConfig = checkAndMergeVerifyOptions()
   // no global verifier when secret is a function (resolved per-call)
   const verifier = (verifierConfig.options.key && typeof verifierConfig.options.key !== 'function')
@@ -390,10 +391,12 @@ function fastifyJwt (fastify, options, next) {
     const cb = verifierConfig.callback
 
     // Fast-path: reuse global verifier when no custom options were passed
-    if (verifier && (!options || typeof options === 'function')) {
+    const useGlobalVerifier = verifier && (!options || typeof options === 'function')
+    if (useGlobalVerifier || (typeof verifierConfig.options.key !== 'function' && !hasDecodeTypeCheck)) {
       let result
       try {
-        result = verifier(token)
+        const localVerifier = useGlobalVerifier ? verifier : getVerifier(verifierConfig.options)
+        result = localVerifier(token)
       } catch (error) {
         return cb(error)
       }
