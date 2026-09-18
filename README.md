@@ -119,7 +119,7 @@ In this object `{ private, public }` the `public` key is a string or buffer cont
 
 Function based `secret` is supported by all methods (`request.jwtVerify()`, `reply.jwtSign()`, `fastify.jwt.sign()`, and `fastify.jwt.verify()`) and is called with a `context` object and a `callback`.
 
-Providers can call `callback(null, key)` or return a Promise resolving to the key. Function-valued `sign.key` and `verify.key` options, including per-call overrides, use this same contract.
+Providers can call `callback(null, key)` or return a Promise resolving to the key. A provider that produces no usable key fails with `FAST_JWT_KEY_FETCHING_ERROR`. Function-valued `sign.key` and `verify.key` options, including per-call overrides, use this same contract.
 
 The `context` object has the following shape:
 - `operation`: `'sign'` or `'verify'`
@@ -881,9 +881,8 @@ const fastify = Fastify()
 const getJwks = buildGetJwks()
 
 fastify.register(fjwt, {
-  decode: { complete: true },
-  secret: (request, token) => {
-    const { header: { kid, alg }, payload: { iss } } = token
+  secret: (context) => {
+    const { header: { kid, alg }, payload: { iss } } = context
     return getJwks.getPublicKey({ kid, domain: iss, alg })
   }
 })
