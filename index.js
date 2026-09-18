@@ -34,10 +34,15 @@ function resolveSecret (secretValue, context, callback) {
     callback(err, val)
   }
 
-  const result = secretValue(context, once)
+  try {
+    const result = secretValue(context, once)
 
-  if (result && typeof result.then === 'function') {
-    result.then(secret => once(null, secret), once)
+    if (result && typeof result.then === 'function') {
+      result.then(secret => once(null, secret), once)
+    }
+  } catch (error) {
+    if (called) throw error
+    once(error)
   }
 }
 
@@ -342,26 +347,27 @@ function fastifyJwt (fastify, options, next) {
 
     // Fast-path: reuse global signer when no custom options were passed
     if (signer && (!options || typeof options === 'function')) {
+      let token
       try {
-        cb(null, signer(payload))
-      /* c8 ignore next 3 */
+        token = signer(payload)
       } catch (error) {
-        cb(error)
+        return cb(error)
       }
-      return
+      return cb(null, token)
     }
 
     const context = { operation: 'sign', payload }
     resolveSecret(signerConfig.options.key, context, function (err, secret) {
       if (err) return cb(err)
+      let token
       try {
         const resolvedOptions = withResolvedKey(signerConfig.options, secret)
         const localSigner = createSigner(resolvedOptions)
-        cb(null, localSigner(payload))
-      /* c8 ignore next 3 */
+        token = localSigner(payload)
       } catch (error) {
-        cb(error)
+        return cb(error)
       }
+      cb(null, token)
     })
   }
 
@@ -385,25 +391,33 @@ function fastifyJwt (fastify, options, next) {
 
     // Fast-path: reuse global verifier when no custom options were passed
     if (verifier && (!options || typeof options === 'function')) {
+      let result
       try {
-        cb(null, verifier(token))
+        result = verifier(token)
       } catch (error) {
-        cb(error)
+        return cb(error)
       }
-      return
+      return cb(null, result)
     }
 
-    const decoded = completeDecoder(token)
+    let decoded
+    try {
+      decoded = completeDecoder(token)
+    } catch (error) {
+      return cb(error)
+    }
     const context = { operation: 'verify', header: decoded.header, payload: decoded.payload, signature: decoded.signature }
     resolveSecret(verifierConfig.options.key, context, function (err, secret) {
       if (err) return cb(err)
+      let result
       try {
         const resolvedOptions = withResolvedKey(verifierConfig.options, secret)
         const localVerifier = getVerifier(resolvedOptions)
-        cb(null, localVerifier(token))
+        result = localVerifier(token)
       } catch (error) {
-        cb(error)
+        return cb(error)
       }
+      cb(null, result)
     })
   }
 

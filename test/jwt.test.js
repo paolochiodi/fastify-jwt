@@ -2,7 +2,7 @@
 
 const { test } = require('node:test')
 const Fastify = require('fastify')
-const { createSigner } = require('fast-jwt')
+const { createSigner, TokenError } = require('fast-jwt')
 const jwt = require('..')
 const defaultExport = require('..').default
 const { fastifyJwt: namedExport } = require('..')
@@ -435,6 +435,218 @@ test('sign and verify with HS-secret', async function (t) {
       t.assert.strictEqual(decodedToken.foo, 'bar')
     })
   })
+})
+
+test('instance verify delivers decode errors through callbacks', async function (t) {
+  const invalidTokens = [
+    { token: 'not-a-jwt-token', code: TokenError.codes.malformed },
+    { token: createSigner({ key: 'test', header: { typ: 'OTHER' } })({ foo: 'bar' }), code: TokenError.codes.invalidType }
+  ]
+
+  for (const mode of ['static', 'static with options', 'function secret', 'function key']) {
+    for (const { token, code } of invalidTokens) {
+      await t.test(`${mode}: ${code}`, async function (t) {
+        let secretCalls = 0
+        const secret = function (_context, callback) {
+          secretCalls++
+          callback(null, 'test')
+        }
+        const fastify = Fastify()
+        t.after(() => fastify.close())
+        fastify.register(jwt, {
+          secret: mode === 'function secret' ? secret : 'test',
+          decode: { checkTyp: 'JWT' },
+          verify: { checkTyp: 'JWT' }
+        })
+        await fastify.ready()
+
+        let callbackCalls = 0
+        let receivedError
+        const callback = function (error) {
+          callbackCalls++
+          receivedError = error
+        }
+
+        t.assert.doesNotThrow(function () {
+          if (mode === 'function key') {
+            fastify.jwt.verify(token, { key: secret }, callback)
+          } else if (mode === 'static with options') {
+            fastify.jwt.verify(token, {}, callback)
+          } else {
+            fastify.jwt.verify(token, callback)
+          }
+        })
+        t.assert.strictEqual(callbackCalls, 1)
+        t.assert.ok(receivedError instanceof TokenError)
+        t.assert.strictEqual(receivedError.code, code)
+        t.assert.strictEqual(receivedError.statusCode, undefined)
+        t.assert.strictEqual(secretCalls, 0)
+      })
+    }
+  }
+})
+
+test('instance methods handle secret provider completion', async function (t) {
+  const token = createSigner({ key: 'test' })({ foo: 'bar' })
+
+  for (const operation of ['sign', 'verify']) {
+    const input = operation === 'sign' ? { foo: 'bar' } : token
+
+    for (const source of ['secret', 'key']) {
+      await t.test(`${operation}: throwing ${source}`, async function (t) {
+        const expectedError = new Error('secret fetch failed')
+        const secret = function () { throw expectedError }
+        const fastify = Fastify()
+        t.after(() => fastify.close())
+        fastify.register(jwt, { secret: source === 'secret' ? secret : 'test' })
+        await fastify.ready()
+
+        const callback = t.mock.fn()
+        t.assert.doesNotThrow(function () {
+          if (source === 'key') {
+            fastify.jwt[operation](input, { key: secret }, callback)
+          } else {
+            fastify.jwt[operation](input, callback)
+          }
+        })
+        t.assert.strictEqual(callback.mock.callCount(), 1)
+        t.assert.strictEqual(callback.mock.calls[0].arguments[0], expectedError)
+      })
+    }
+
+    await t.test(`${operation}: provider throws after completion`, async function (t) {
+      const expectedError = new Error('provider threw after callback')
+      const fastify = Fastify()
+      t.after(() => fastify.close())
+      fastify.register(jwt, {
+        secret: function (_context, callback) {
+          callback(null, 'test')
+          throw expectedError
+        }
+      })
+      await fastify.ready()
+
+      const callback = t.mock.fn()
+      t.assert.throws(() => fastify.jwt[operation](input, callback), error => error === expectedError)
+      t.assert.strictEqual(callback.mock.callCount(), 1)
+      t.assert.ifError(callback.mock.calls[0].arguments[0])
+      t.assert.ok(callback.mock.calls[0].arguments[1])
+    })
+
+    for (const reject of [false, true]) {
+      await t.test(`${operation}: callback followed by Promise ${reject ? 'rejection' : 'resolution'}`, async function (t) {
+        const fastify = Fastify()
+        t.after(() => fastify.close())
+        fastify.register(jwt, {
+          secret: async function (_context, callback) {
+            callback(null, 'test')
+            if (reject) throw new Error('late rejection')
+            return 'other-secret'
+          }
+        })
+        await fastify.ready()
+
+        const callback = t.mock.fn()
+        fastify.jwt[operation](input, callback)
+        await new Promise(resolve => setImmediate(resolve))
+        t.assert.strictEqual(callback.mock.callCount(), 1)
+        t.assert.ifError(callback.mock.calls[0].arguments[0])
+        t.assert.ok(callback.mock.calls[0].arguments[1])
+      })
+    }
+  }
+})
+
+test('instance methods do not catch consumer callback exceptions', async function (t) {
+  const token = createSigner({ key: 'test' })({ foo: 'bar' })
+  const invalidToken = createSigner({ key: 'wrong-secret' })({ foo: 'bar' })
+
+  for (const operation of ['sign', 'verify']) {
+    for (const mode of ['static', 'static with options', 'function secret', 'function key']) {
+      for (const fail of [false, true]) {
+        await t.test(`${operation}: ${mode}, ${fail ? 'error' : 'success'} callback`, async function (t) {
+          const expectedError = new Error('consumer callback failed')
+          const secret = function (_context, callback) { callback(null, 'test') }
+          const fastify = Fastify()
+          t.after(() => fastify.close())
+          fastify.register(jwt, { secret: mode === 'function secret' ? secret : 'test' })
+          await fastify.ready()
+
+          const input = operation === 'sign'
+            ? (fail ? { exp: 'invalid' } : { foo: 'bar' })
+            : (fail ? invalidToken : token)
+          const callback = t.mock.fn(function () { throw expectedError })
+
+          t.assert.throws(function () {
+            if (mode === 'function key') {
+              fastify.jwt[operation](input, { key: secret }, callback)
+            } else if (mode === 'static with options') {
+              fastify.jwt[operation](input, {}, callback)
+            } else {
+              fastify.jwt[operation](input, callback)
+            }
+          }, error => error === expectedError)
+          t.assert.strictEqual(callback.mock.callCount(), 1)
+          const [error, result] = callback.mock.calls[0].arguments
+          if (fail) {
+            t.assert.ok(error instanceof TokenError)
+            t.assert.strictEqual(result, undefined)
+          } else {
+            t.assert.ifError(error)
+            t.assert.ok(result)
+          }
+        })
+      }
+    }
+  }
+})
+
+test('route methods deliver synchronous secret provider errors', async function (t) {
+  const token = createSigner({ key: 'test' })({ foo: 'bar' })
+
+  for (const operation of ['sign', 'verify']) {
+    for (const source of ['secret', 'key']) {
+      for (const useCallback of [false, true]) {
+        await t.test(`${operation}: ${source}, ${useCallback ? 'callback' : 'Promise'}`, async function (t) {
+          const expectedError = new Error('secret fetch failed')
+          const secret = function () { throw expectedError }
+          const fastify = Fastify()
+          t.after(() => fastify.close())
+          fastify.register(jwt, { secret: source === 'secret' ? secret : 'test' })
+          const options = source === 'key' ? { [operation]: { key: secret } } : undefined
+          const receivedErrors = []
+
+          fastify.get('/', async function (request, reply) {
+            const invoke = operation === 'sign'
+              ? callback => reply.jwtSign({ foo: 'bar' }, options, callback)
+              : callback => request.jwtVerify(options, callback)
+            if (useCallback) {
+              return new Promise(function (resolve) {
+                invoke(function (error) {
+                  receivedErrors.push(error)
+                  resolve({ handled: true })
+                })
+              })
+            }
+            try {
+              await invoke()
+            } catch (error) {
+              receivedErrors.push(error)
+            }
+            return { handled: true }
+          })
+
+          const response = await fastify.inject({
+            url: '/',
+            headers: { authorization: `Bearer ${token}` }
+          })
+          t.assert.strictEqual(response.statusCode, 200)
+          t.assert.strictEqual(receivedErrors.length, 1)
+          t.assert.strictEqual(receivedErrors[0], expectedError)
+        })
+      }
+    }
+  }
 })
 
 test('sign and verify with function secret (server methods)', async function (t) {
@@ -941,6 +1153,7 @@ test('sign and verify with function secret (server methods)', async function (t)
     await fastify.ready()
 
     const { promise, resolve } = helper.withResolvers()
+    let callbackCalls = 0
 
     // An async function that also calls the callback — only one should win
     const keyFn = async function (_context, cb) {
@@ -949,6 +1162,7 @@ test('sign and verify with function secret (server methods)', async function (t)
     }
 
     fastify.jwt.sign({ foo: 'bar' }, { key: keyFn }, function (error, token) {
+      callbackCalls++
       t.assert.ifError(error)
       t.assert.ok(token)
 
@@ -958,7 +1172,9 @@ test('sign and verify with function secret (server methods)', async function (t)
       t.assert.strictEqual(result.foo, 'bar')
       resolve()
     })
-    return promise
+    await promise
+    await new Promise(resolve => setImmediate(resolve))
+    t.assert.strictEqual(callbackCalls, 1)
   })
 
   await t.test('replySign with per-call static key override', async function (t) {
@@ -2190,6 +2406,97 @@ test('decode', async function (t) {
       fastify.jwt.decode('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXUiJ9.e30.ha5mKb-6aDOVHh5lRaUBNdDmMAYLOl1no3LQkV2mAMQ')
     }, { code: 'FST_JWT_AUTHORIZATION_TOKEN_INVALID' })
   })
+})
+
+test('request verification honors per-call decode options', async function (t) {
+  const cases = [
+    {
+      name: 'stricter per-call type check',
+      globalDecode: {},
+      decode: { checkTyp: 'JWT' },
+      typ: 'OTHER',
+      messages: { authorizationTokenInvalid: error => `Rejected: ${error.message}` },
+      errorMessage: 'Rejected: The type must be "JWT".'
+    },
+    {
+      name: 'per-call type overrides global type',
+      globalDecode: { checkTyp: 'JWT' },
+      decode: { checkTyp: 'OTHER' },
+      typ: 'OTHER'
+    },
+    {
+      name: 'empty decode options retain global type check',
+      globalDecode: { checkTyp: 'JWT' },
+      decode: {},
+      typ: 'OTHER',
+      messages: { authorizationTokenInvalid: 'Invalid token: %s' },
+      errorMessage: 'Invalid token: The type must be "JWT".'
+    },
+    {
+      name: 'complete false retains full secret context',
+      globalDecode: { checkTyp: 'JWT' },
+      decode: { complete: false },
+      typ: 'JWT'
+    },
+    {
+      name: 'malformed tokens use shared error mapping',
+      globalDecode: {},
+      decode: {},
+      token: 'not-a-jwt-token',
+      errorMessage: 'Authorization token is invalid: The token is malformed.'
+    }
+  ]
+
+  for (const useCallback of [false, true]) {
+    for (const scenario of cases) {
+      await t.test(`${scenario.name}: ${useCallback ? 'callback' : 'Promise'}`, async function (t) {
+        const contexts = []
+        const fastify = Fastify()
+        t.after(() => fastify.close())
+        fastify.register(jwt, {
+          secret: function (context, callback) {
+            contexts.push(context)
+            callback(null, 'test')
+          },
+          decode: scenario.globalDecode,
+          messages: scenario.messages
+        })
+        fastify.get('/', function (request, reply) {
+          const options = { decode: scenario.decode }
+          if (useCallback) {
+            request.jwtVerify(options, function (error, result) {
+              reply.send(error || result)
+            })
+            return reply
+          }
+          return request.jwtVerify(options)
+        })
+
+        const token = scenario.token || createSigner({ key: 'test', header: { typ: scenario.typ }, noTimestamp: true })({ foo: 'bar' })
+        const response = await fastify.inject({
+          url: '/',
+          headers: { authorization: `Bearer ${token}` }
+        })
+
+        if (scenario.errorMessage) {
+          t.assert.strictEqual(response.statusCode, 401)
+          t.assert.strictEqual(response.json().code, 'FST_JWT_AUTHORIZATION_TOKEN_INVALID')
+          t.assert.strictEqual(response.json().message, scenario.errorMessage)
+          t.assert.strictEqual(contexts.length, 0)
+        } else {
+          t.assert.strictEqual(response.statusCode, 200)
+          t.assert.deepStrictEqual(response.json(), { foo: 'bar' })
+          t.assert.strictEqual(contexts.length, 1)
+          const [context] = contexts
+          t.assert.strictEqual(context.operation, 'verify')
+          t.assert.strictEqual(context.header.typ, scenario.typ)
+          t.assert.deepStrictEqual(context.payload, { foo: 'bar' })
+          t.assert.strictEqual(context.signature, token.split('.')[2])
+          t.assert.ok(context.request)
+        }
+      })
+    }
+  }
 })
 
 test('errors', async function (t) {
